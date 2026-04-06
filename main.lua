@@ -84,7 +84,7 @@ end
 ---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
 ---@return string
 function M.shell_command(ctx)
-	local tv_args = { "tv", "--source-output", "{}" }
+	local tv_args = { "tv", "--inline", "--no-status-bar", "--source-output", "{}" }
 	local cwd = tostring(ctx.cwd)
 
 	for _, arg in ipairs(ctx.args) do
