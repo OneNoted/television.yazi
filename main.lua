@@ -8,6 +8,19 @@ local DEFAULTS = {
 	title = "Television",
 }
 
+local ZOXIDE_CHANNEL_NAME = "Yazi Zoxide"
+local ZOXIDE_CHANNEL_FILE = "yazi-zoxide.toml"
+local ZOXIDE_CHANNEL_BODY = [[
+[metadata]
+name = "Yazi Zoxide"
+description = "Directory jumping for Yazi via zoxide"
+requirements = ["zoxide"]
+
+[source]
+command = "zoxide query -l"
+output = "{}"
+]]
+
 local function shell_quote(value)
 	value = tostring(value)
 	return "'" .. value:gsub("'", "'\\''") .. "'"
@@ -79,7 +92,7 @@ function M.shell_command(ctx)
 	end
 
 	if ctx.mode == "zoxide" then
-		tv_args[#tv_args + 1] = "Yazi Zoxide"
+		tv_args[#tv_args + 1] = ZOXIDE_CHANNEL_NAME
 	else
 		tv_args[#tv_args + 1] = ctx.channel
 		tv_args[#tv_args + 1] = cwd
@@ -92,6 +105,13 @@ function M.shell_command(ctx)
 	end
 
 	local lines = {
+		'config_root="${XDG_CONFIG_HOME:-$HOME/.config}/television"',
+		'cable_dir="$config_root/cable"',
+		'channel_file="$cable_dir/' .. ZOXIDE_CHANNEL_FILE .. '"',
+		'mkdir -p "$cable_dir"',
+		"cat > \"$channel_file\" <<'EOF'",
+		ZOXIDE_CHANNEL_BODY,
+		"EOF",
 		"sel=$(" .. table.concat(shell_cmd, " ") .. ")",
 		"rc=$?",
 		'[ "$rc" -eq 130 ] && exit 0',
