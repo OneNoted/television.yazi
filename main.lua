@@ -26,6 +26,30 @@ local function shell_quote(value)
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
+local function television_config_dir()
+	local xdg = os.getenv("XDG_CONFIG_HOME")
+	if xdg and xdg ~= "" then
+		return xdg .. "/television"
+	end
+	return os.getenv("HOME") .. "/.config/television"
+end
+
+local function ensure_zoxide_channel()
+	local cable_dir = television_config_dir() .. "/cable"
+	local channel_file = cable_dir .. "/" .. ZOXIDE_CHANNEL_FILE
+
+	os.execute("mkdir -p " .. shell_quote(cable_dir))
+
+	local file = io.open(channel_file, "w")
+	if not file then
+		return nil, "Cannot write channel file: " .. channel_file
+	end
+
+	file:write(ZOXIDE_CHANNEL_BODY)
+	file:close()
+	return channel_file, nil
+end
+
 local update_opts = ya.sync(function(state, opts)
 	opts = type(opts) == "table" and opts or {}
 
@@ -75,66 +99,77 @@ function M:entry(job)
 		}
 	end
 
-	ya.emit("shell", {
-		M.shell_command(ctx),
-		block = true,
-	})
+	if ctx.mode == "zoxide" then
+		local _, channel_err = ensure_zoxide_channel()
+		if channel_err then
+			return ya.notify {
+				title = ctx.title,
+				content = channel_err,
+				timeout = 5,
+				level = "error",
+			}
+		end
+	end
+
+	local permit = ui.hide()
+	local output, err = M.run_with(ctx)
+	permit:drop()
+
+	if not output then
+		return ya.notify {
+			title = ctx.title,
+			content = tostring(err),
+			timeout = 5,
+			level = "error",
+		}
+	end
+
+	if ctx.mode == "zoxide" then
+		local target = output:gsub("[\r\n]+$", "")
+		if target ~= "" then
+			ya.emit("cd", { target, raw = true })
+		end
+		return
+	end
+
+	local urls = M.split_urls(ctx.cwd, output)
+	if #urls == 1 then
+		local cha = fs.cha(urls[1])
+		ya.emit(cha and cha.is_dir and "cd" or "reveal", { urls[1], raw = true })
+	elseif #urls > 1 then
+		urls.state = "on"
+		ya.emit("toggle_all", urls)
+	end
 end
 
 ---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
----@return string
-function M.shell_command(ctx)
-	local tv_args = { "tv", "--inline", "--no-status-bar", "--source-output", "{}" }
-	local cwd = tostring(ctx.cwd)
+---@return string?, Error?
+function M.run_with(ctx)
+	local child, err = Command("tv")
+		:args(ctx.args)
+		:arg("--inline")
+		:arg("--no-status-bar")
+		:arg("--source-output")
+		:arg("{}")
+		:arg(ctx.mode == "zoxide" and ZOXIDE_CHANNEL_NAME or ctx.channel)
+		:arg(ctx.mode == "zoxide" and tostring(ctx.cwd) or tostring(ctx.cwd))
+		:stdin(Command.INHERIT)
+		:stdout(Command.PIPED)
+		:stderr(Command.INHERIT)
+		:spawn()
 
-	for _, arg in ipairs(ctx.args) do
-		tv_args[#tv_args + 1] = arg
+	if not child then
+		return nil, Err("Failed to start `tv`, error: %s", err)
 	end
 
-	if ctx.mode == "zoxide" then
-		tv_args[#tv_args + 1] = ZOXIDE_CHANNEL_NAME
-	else
-		tv_args[#tv_args + 1] = ctx.channel
-		tv_args[#tv_args + 1] = cwd
+	local output, wait_err = child:wait_with_output()
+	if not output then
+		return nil, Err("Cannot read `tv` output, error: %s", wait_err)
+	elseif not output.status.success and output.status.code ~= 130 then
+		return nil, Err("`tv` exited with error code %s", output.status.code)
 	end
 
-	local shell_cmd = {}
-
-	for _, arg in ipairs(tv_args) do
-		shell_cmd[#shell_cmd + 1] = shell_quote(arg)
-	end
-
-	local lines = {
-		'config_root="${XDG_CONFIG_HOME:-$HOME/.config}/television"',
-		'cable_dir="$config_root/cable"',
-		'channel_file="$cable_dir/' .. ZOXIDE_CHANNEL_FILE .. '"',
-		'mkdir -p "$cable_dir"',
-		"cat > \"$channel_file\" <<'EOF'",
-		ZOXIDE_CHANNEL_BODY,
-		"EOF",
-		"sel=$(" .. table.concat(shell_cmd, " ") .. ")",
-		"rc=$?",
-		'[ "$rc" -eq 130 ] && exit 0',
-		'[ "$rc" -eq 0 ] || exit "$rc"',
-		'[ -n "$sel" ] || exit 0',
-	}
-
-	if ctx.mode == "zoxide" then
-		lines[#lines + 1] = 'ya emit cd "$sel"'
-	else
-		lines[#lines + 1] = "cwd=" .. shell_quote(cwd)
-		lines[#lines + 1] = 'case "$sel" in'
-		lines[#lines + 1] = '  /*) target="$sel" ;;'
-		lines[#lines + 1] = '  *) target="$cwd/$sel" ;;'
-		lines[#lines + 1] = "esac"
-		lines[#lines + 1] = 'if [ -d "$target" ]; then'
-		lines[#lines + 1] = '  ya emit cd "$target"'
-		lines[#lines + 1] = "else"
-		lines[#lines + 1] = '  ya emit reveal "$target"'
-		lines[#lines + 1] = "fi"
-	end
-
-	return table.concat(lines, "\n")
+	return output.stdout, nil
 end
 
 return M
