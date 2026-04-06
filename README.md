@@ -15,6 +15,10 @@ A [Yazi](https://github.com/sxyazi/yazi) plugin that uses [television](https://g
 
 ## Installation
 
+```sh
+ya pkg add OneNoted/television.yazi
+```
+
 For a local checkout, place this repo at `~/.config/yazi/plugins/television.yazi`.
 
 ## Configuration
