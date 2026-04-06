@@ -18,6 +18,12 @@ end)
 
 local context = ya.sync(function(state, job_args)
 	local args = {}
+	local mode = "files"
+
+	if type(job_args) == "table" and type(job_args[1]) == "string" and not job_args[1]:match("^%-") then
+		mode = job_args[1]
+		job_args = { table.unpack(job_args, 2) }
+	end
 
 	for _, arg in ipairs(state.args or DEFAULTS.args) do
 		args[#args + 1] = tostring(arg)
@@ -31,6 +37,7 @@ local context = ya.sync(function(state, job_args)
 		args = args,
 		channel = state.channel or DEFAULTS.channel,
 		cwd = cx.active.current.cwd,
+		mode = mode,
 		title = state.title or DEFAULTS.title,
 	}
 end)
@@ -41,7 +48,7 @@ function M:entry(job)
 	ya.emit("escape", { visual = true })
 
 	local ctx = context(job and type(job.args) == "table" and job.args or {})
-	if ctx.cwd.scheme.is_virtual then
+	if ctx.mode == "files" and ctx.cwd.scheme.is_virtual then
 		return ya.notify {
 			title = ctx.title,
 			content = "Not supported under virtual filesystems",
@@ -73,18 +80,18 @@ function M:entry(job)
 	end
 end
 
----@param ctx { args: string[], channel: string, cwd: Url, title: string }
+---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
 ---@return string?, Error?
 function M.run_with(ctx)
-	local child, err = Command("tv")
-		:args(ctx.args)
-		:arg("--source-output")
-		:arg("{}")
-		:arg(ctx.channel)
-		:arg(tostring(ctx.cwd))
-		:stdin(Command.INHERIT)
-		:stdout(Command.PIPED)
-		:spawn()
+	local command = Command("tv"):args(ctx.args):arg("--source-output"):arg("{}")
+
+	if ctx.mode == "zoxide" then
+		command = command:arg("--source-command"):arg("zoxide query -l")
+	else
+		command = command:arg(ctx.channel):arg(tostring(ctx.cwd))
+	end
+
+	local child, err = command:stdin(Command.INHERIT):stdout(Command.PIPED):spawn()
 
 	if not child then
 		return nil, Err("Failed to start `tv`, error: %s", err)
