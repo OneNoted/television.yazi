@@ -19,29 +19,6 @@ local function strip_ansi(text)
 	return text
 end
 
-local function parse_selection(path)
-	local file = io.open(path, "r")
-	if not file then
-		return nil
-	end
-
-	local text = file:read("*a") or ""
-	file:close()
-
-	text = strip_ansi(text)
-
-	local selected = nil
-	for line in text:gmatch("[^\n]+") do
-		local cleaned = line:gsub("\r", "")
-		cleaned = cleaned:gsub("^%s*(.-)%s*$", "%1")
-		if cleaned ~= "" and not cleaned:match("^Script started on ") and not cleaned:match("^Script done on ") then
-			selected = cleaned
-		end
-	end
-
-	return selected
-end
-
 local update_opts = ya.sync(function(state, opts)
 	opts = type(opts) == "table" and opts or {}
 
@@ -91,33 +68,17 @@ function M:entry(job)
 		}
 	end
 
-	local permit = ui.hide()
-	local output, err = M.run_with(ctx)
-	permit:drop()
-
-	if not output then
-		return ya.notify {
-			title = ctx.title,
-			content = tostring(err),
-			timeout = 5,
-			level = "error",
-		}
-	end
-
-	local urls = M.split_urls(ctx.cwd, output)
-	if #urls == 1 then
-		local cha = fs.cha(urls[1])
-		ya.emit(cha and cha.is_dir and "cd" or "reveal", { urls[1], raw = true })
-	elseif #urls > 1 then
-		urls.state = "on"
-		ya.emit("toggle_all", urls)
-	end
+	ya.emit("shell", {
+		M.shell_command(ctx),
+		block = true,
+	})
 end
 
 ---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
----@return string?, Error?
-function M.run_with(ctx)
+---@return string
+function M.shell_command(ctx)
 	local tv_args = { "tv", "--source-output", "{}" }
+	local cwd = tostring(ctx.cwd)
 
 	for _, arg in ipairs(ctx.args) do
 		tv_args[#tv_args + 1] = arg
@@ -125,66 +86,55 @@ function M.run_with(ctx)
 
 	if ctx.mode == "zoxide" then
 		tv_args[#tv_args + 1] = "--source-command"
-		tv_args[#tv_args + 1] = "zoxide query -l"
+		tv_args[#tv_args + 1] = "zoxide query -l --exclude " .. shell_quote(cwd)
 	else
 		tv_args[#tv_args + 1] = ctx.channel
-		tv_args[#tv_args + 1] = tostring(ctx.cwd)
+		tv_args[#tv_args + 1] = cwd
 	end
 
-	local transcript = os.tmpname()
-	local script_cmd = { "script", "-q", "-e", "-c" }
 	local shell_cmd = {}
 
 	for _, arg in ipairs(tv_args) do
 		shell_cmd[#shell_cmd + 1] = shell_quote(arg)
 	end
 
-	script_cmd[#script_cmd + 1] = table.concat(shell_cmd, " ")
-	script_cmd[#script_cmd + 1] = transcript
+	local lines = {
+		"tmp=$(mktemp)",
+		'cleanup() { rm -f "$tmp"; }',
+		"trap cleanup EXIT INT TERM",
+		"script -q -e -c " .. shell_quote(table.concat(shell_cmd, " ")) .. ' "$tmp"',
+		"sel=$(python - <<'PY' \"$tmp\"",
+		"import pathlib, re, sys",
+		"text = pathlib.Path(sys.argv[1]).read_text(errors='replace')",
+		"text = re.sub(r'\\x1b\\[[0-9;?]*[\\x20-\\x2f]*[@-~]', '', text)",
+		"text = re.sub(r'\\x1b[@-_]', '', text)",
+		"selected = ''",
+		"for line in text.splitlines():",
+		"    cleaned = line.replace('\\r', '').strip()",
+		"    if cleaned and not cleaned.startswith('Script started on ') and not cleaned.startswith('Script done on '):",
+		"        selected = cleaned",
+		"print(selected)",
+		"PY",
+		")",
+		'[ -n "$sel" ] || exit 0',
+	}
 
-	local child, err = Command(script_cmd[1])
-		:args({ table.unpack(script_cmd, 2) })
-		:stdin(Command.INHERIT)
-		:stdout(Command.INHERIT)
-		:stderr(Command.INHERIT)
-		:spawn()
-
-	if not child then
-		os.remove(transcript)
-		return nil, Err("Failed to start `tv`, error: %s", err)
+	if ctx.mode == "zoxide" then
+		lines[#lines + 1] = 'ya emit cd "$sel"'
+	else
+		lines[#lines + 1] = "cwd=" .. shell_quote(cwd)
+		lines[#lines + 1] = 'case "$sel" in'
+		lines[#lines + 1] = '  /*) target="$sel" ;;'
+		lines[#lines + 1] = '  *) target="$cwd/$sel" ;;'
+		lines[#lines + 1] = "esac"
+		lines[#lines + 1] = 'if [ -d "$target" ]; then'
+		lines[#lines + 1] = '  ya emit cd "$target"'
+		lines[#lines + 1] = "else"
+		lines[#lines + 1] = '  ya emit reveal "$target"'
+		lines[#lines + 1] = "fi"
 	end
 
-	local status
-	status, err = child:wait()
-	if not status then
-		os.remove(transcript)
-		return nil, Err("Cannot read `tv` output, error: %s", err)
-	elseif not status.success and status.code ~= 130 then
-		os.remove(transcript)
-		return nil, Err("`tv` exited with error code %s", status.code)
-	end
-
-	local selected = parse_selection(transcript)
-	os.remove(transcript)
-	return selected or "", nil
-end
-
----@param cwd Url
----@param output string
----@return Url[]
-function M.split_urls(cwd, output)
-	local urls = {}
-
-	for line in output:gmatch("[^\r\n]+") do
-		local url = Url(line)
-		if url.is_absolute then
-			urls[#urls + 1] = url
-		else
-			urls[#urls + 1] = cwd:join(url)
-		end
-	end
-
-	return urls
+	return table.concat(lines, "\n")
 end
 
 return M
