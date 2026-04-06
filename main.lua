@@ -79,8 +79,7 @@ function M.shell_command(ctx)
 	end
 
 	if ctx.mode == "zoxide" then
-		tv_args[#tv_args + 1] = "--source-command"
-		tv_args[#tv_args + 1] = "zoxide query -l --exclude " .. shell_quote(cwd)
+		tv_args[#tv_args + 1] = "Yazi Zoxide"
 	else
 		tv_args[#tv_args + 1] = ctx.channel
 		tv_args[#tv_args + 1] = cwd
