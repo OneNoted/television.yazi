@@ -8,6 +8,40 @@ local DEFAULTS = {
 	title = "Television",
 }
 
+local function shell_quote(value)
+	value = tostring(value)
+	return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function strip_ansi(text)
+	text = text:gsub("\27%[[0-9;?]*[%c ]*[@-~]", "")
+	text = text:gsub("\27[@-_]", "")
+	return text
+end
+
+local function parse_selection(path)
+	local file = io.open(path, "r")
+	if not file then
+		return nil
+	end
+
+	local text = file:read("*a") or ""
+	file:close()
+
+	text = strip_ansi(text)
+
+	local selected = nil
+	for line in text:gmatch("[^\n]+") do
+		local cleaned = line:gsub("\r", "")
+		cleaned = cleaned:gsub("^%s*(.-)%s*$", "%1")
+		if cleaned ~= "" and not cleaned:match("^Script started on ") and not cleaned:match("^Script done on ") then
+			selected = cleaned
+		end
+	end
+
+	return selected
+end
+
 local update_opts = ya.sync(function(state, opts)
 	opts = type(opts) == "table" and opts or {}
 
@@ -83,29 +117,56 @@ end
 ---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
 ---@return string?, Error?
 function M.run_with(ctx)
-	local command = Command("tv"):args(ctx.args):arg("--source-output"):arg("{}")
+	local tv_args = { "tv", "--source-output", "{}" }
 
-	if ctx.mode == "zoxide" then
-		command = command:arg("--source-command"):arg("zoxide query -l")
-	else
-		command = command:arg(ctx.channel):arg(tostring(ctx.cwd))
+	for _, arg in ipairs(ctx.args) do
+		tv_args[#tv_args + 1] = arg
 	end
 
-	local child, err = command:stdin(Command.INHERIT):stdout(Command.PIPED):spawn()
+	if ctx.mode == "zoxide" then
+		tv_args[#tv_args + 1] = "--source-command"
+		tv_args[#tv_args + 1] = "zoxide query -l"
+	else
+		tv_args[#tv_args + 1] = ctx.channel
+		tv_args[#tv_args + 1] = tostring(ctx.cwd)
+	end
+
+	local transcript = os.tmpname()
+	local script_cmd = { "script", "-q", "-e", "-c" }
+	local shell_cmd = {}
+
+	for _, arg in ipairs(tv_args) do
+		shell_cmd[#shell_cmd + 1] = shell_quote(arg)
+	end
+
+	script_cmd[#script_cmd + 1] = table.concat(shell_cmd, " ")
+	script_cmd[#script_cmd + 1] = transcript
+
+	local child, err = Command(script_cmd[1])
+		:args({ table.unpack(script_cmd, 2) })
+		:stdin(Command.INHERIT)
+		:stdout(Command.INHERIT)
+		:stderr(Command.INHERIT)
+		:spawn()
 
 	if not child then
+		os.remove(transcript)
 		return nil, Err("Failed to start `tv`, error: %s", err)
 	end
 
-	local output
-	output, err = child:wait_with_output()
-	if not output then
+	local status
+	status, err = child:wait()
+	if not status then
+		os.remove(transcript)
 		return nil, Err("Cannot read `tv` output, error: %s", err)
-	elseif not output.status.success and output.status.code ~= 130 then
-		return nil, Err("`tv` exited with error code %s", output.status.code)
+	elseif not status.success and status.code ~= 130 then
+		os.remove(transcript)
+		return nil, Err("`tv` exited with error code %s", status.code)
 	end
 
-	return output.stdout, nil
+	local selected = parse_selection(transcript)
+	os.remove(transcript)
+	return selected or "", nil
 end
 
 ---@param cwd Url
