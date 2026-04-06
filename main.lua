@@ -13,12 +13,6 @@ local function shell_quote(value)
 	return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
-local function strip_ansi(text)
-	text = text:gsub("\27%[[0-9;?]*[%c ]*[@-~]", "")
-	text = text:gsub("\27[@-_]", "")
-	return text
-end
-
 local update_opts = ya.sync(function(state, opts)
 	opts = type(opts) == "table" and opts or {}
 
@@ -99,23 +93,10 @@ function M.shell_command(ctx)
 	end
 
 	local lines = {
-		"tmp=$(mktemp)",
-		'cleanup() { rm -f "$tmp"; }',
-		"trap cleanup EXIT INT TERM",
-		"script -q -e -c " .. shell_quote(table.concat(shell_cmd, " ")) .. ' "$tmp"',
-		"sel=$(python - <<'PY' \"$tmp\"",
-		"import pathlib, re, sys",
-		"text = pathlib.Path(sys.argv[1]).read_text(errors='replace')",
-		"text = re.sub(r'\\x1b\\[[0-9;?]*[\\x20-\\x2f]*[@-~]', '', text)",
-		"text = re.sub(r'\\x1b[@-_]', '', text)",
-		"selected = ''",
-		"for line in text.splitlines():",
-		"    cleaned = line.replace('\\r', '').strip()",
-		"    if cleaned and not cleaned.startswith('Script started on ') and not cleaned.startswith('Script done on '):",
-		"        selected = cleaned",
-		"print(selected)",
-		"PY",
-		")",
+		"sel=$(" .. table.concat(shell_cmd, " ") .. ")",
+		"rc=$?",
+		'[ "$rc" -eq 130 ] && exit 0',
+		'[ "$rc" -eq 0 ] || exit "$rc"',
 		'[ -n "$sel" ] || exit 0',
 	}
 
