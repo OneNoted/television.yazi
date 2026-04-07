@@ -145,17 +145,30 @@ end
 ---@param ctx { args: string[], channel: string, cwd: Url, mode: string, title: string }
 ---@return string?, Error?
 function M.run_with(ctx)
-	local child, err = Command("tv")
-		:args(ctx.args)
-		:arg("--inline")
-		:arg("--no-status-bar")
-		:arg("--source-output")
-		:arg("{}")
-		:arg(ctx.mode == "zoxide" and ZOXIDE_CHANNEL_NAME or ctx.channel)
-		:arg(ctx.mode == "zoxide" and tostring(ctx.cwd) or tostring(ctx.cwd))
+	local tv_args = { "tv", "--source-output", "{}" }
+
+	for _, arg in ipairs(ctx.args) do
+		tv_args[#tv_args + 1] = tostring(arg)
+	end
+
+	if ctx.mode == "zoxide" then
+		tv_args[#tv_args + 1] = ZOXIDE_CHANNEL_NAME
+	else
+		tv_args[#tv_args + 1] = ctx.channel
+		tv_args[#tv_args + 1] = tostring(ctx.cwd)
+	end
+
+	local wrapped = {}
+	for _, arg in ipairs(tv_args) do
+		wrapped[#wrapped + 1] = shell_quote(arg)
+	end
+
+	local child, err = Command("sh")
+		:arg("-lc")
+		:arg(table.concat(wrapped, " ") .. " 2>/dev/tty")
 		:stdin(Command.INHERIT)
 		:stdout(Command.PIPED)
-		:stderr(Command.INHERIT)
+		:stderr(Command.PIPED)
 		:spawn()
 
 	if not child then
@@ -166,7 +179,7 @@ function M.run_with(ctx)
 	if not output then
 		return nil, Err("Cannot read `tv` output, error: %s", wait_err)
 	elseif not output.status.success and output.status.code ~= 130 then
-		return nil, Err("`tv` exited with error code %s", output.status.code)
+		return nil, Err("`tv` exited with error code %s: %s", output.status.code, (output.stderr or ""):gsub("%s+$", ""))
 	end
 
 	return output.stdout, nil
