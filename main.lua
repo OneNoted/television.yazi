@@ -8,6 +8,23 @@ local DEFAULTS = {
 	title = "Television",
 }
 
+local FILES_CHANNEL_NAME = "Yazi Files"
+local FILES_CHANNEL_FILE = "yazi-files.toml"
+local FILES_CHANNEL_BODY = [[
+[metadata]
+name = "Yazi Files"
+description = "File and directory jumping for Yazi"
+requirements = ["fd", "bat"]
+
+[source]
+command = "fd --hidden --follow --strip-cwd-prefix --exclude .git ."
+output = "{}"
+
+[preview]
+command = "bat -n --color=always '{}'"
+env = { BAT_THEME = "ansi" }
+]]
+
 local ZOXIDE_CHANNEL_NAME = "Yazi Zoxide"
 local ZOXIDE_CHANNEL_FILE = "yazi-zoxide.toml"
 local ZOXIDE_CHANNEL_BODY = [[
@@ -34,9 +51,9 @@ local function television_config_dir()
 	return os.getenv("HOME") .. "/.config/television"
 end
 
-local function ensure_zoxide_channel()
+local function ensure_channel(file_name, body)
 	local cable_dir = television_config_dir() .. "/cable"
-	local channel_file = cable_dir .. "/" .. ZOXIDE_CHANNEL_FILE
+	local channel_file = cable_dir .. "/" .. file_name
 
 	os.execute("mkdir -p " .. shell_quote(cable_dir))
 
@@ -45,7 +62,7 @@ local function ensure_zoxide_channel()
 		return nil, "Cannot write channel file: " .. channel_file
 	end
 
-	file:write(ZOXIDE_CHANNEL_BODY)
+	file:write(body)
 	file:close()
 	return channel_file, nil
 end
@@ -100,7 +117,17 @@ function M:entry(job)
 	end
 
 	if ctx.mode == "zoxide" then
-		local _, channel_err = ensure_zoxide_channel()
+		local _, channel_err = ensure_channel(ZOXIDE_CHANNEL_FILE, ZOXIDE_CHANNEL_BODY)
+		if channel_err then
+			return ya.notify {
+				title = ctx.title,
+				content = channel_err,
+				timeout = 5,
+				level = "error",
+			}
+		end
+	elseif ctx.channel == FILES_CHANNEL_NAME then
+		local _, channel_err = ensure_channel(FILES_CHANNEL_FILE, FILES_CHANNEL_BODY)
 		if channel_err then
 			return ya.notify {
 				title = ctx.title,
@@ -165,10 +192,10 @@ function M.run_with(ctx)
 
 	local child, err = Command("sh")
 		:arg("-lc")
-		:arg(table.concat(wrapped, " ") .. " 2>/dev/tty")
-		:stdin(Command.INHERIT)
+		:arg(table.concat(wrapped, " ") .. " < /dev/tty")
+		:stdin(Command.NULL)
 		:stdout(Command.PIPED)
-		:stderr(Command.PIPED)
+		:stderr(Command.INHERIT)
 		:spawn()
 
 	if not child then
@@ -179,10 +206,28 @@ function M.run_with(ctx)
 	if not output then
 		return nil, Err("Cannot read `tv` output, error: %s", wait_err)
 	elseif not output.status.success and output.status.code ~= 130 then
-		return nil, Err("`tv` exited with error code %s: %s", output.status.code, (output.stderr or ""):gsub("%s+$", ""))
+		return nil, Err("`tv` exited with error code %s", output.status.code)
 	end
 
 	return output.stdout, nil
+end
+
+---@param cwd Url
+---@param output string
+---@return Url[]
+function M.split_urls(cwd, output)
+	local urls = {}
+
+	for line in output:gmatch("[^\r\n]+") do
+		local url = Url(line)
+		if url.is_absolute then
+			urls[#urls + 1] = url
+		else
+			urls[#urls + 1] = cwd:join(url)
+		end
+	end
+
+	return urls
 end
 
 return M
